@@ -661,7 +661,7 @@ class Mapper(object):
                                          idx,  self.device, show_forecast=self.mesh_coarse_level,
                                          clean_mesh=self.clean_mesh, get_mask_use_all_frames=False)
 
-                # 如果处理到最后一帧，生成最终的 mesh 文件
+                # 如果处理到最后一帧, 生成最终的 mesh 文件
                 if idx == self.n_img-1:
                     mesh_out_file = f'{self.output}/mesh/final_mesh.ply'
                     self.mesher.get_mesh(mesh_out_file, self.c, self.decoders, self.keyframe_dict, self.estimate_c2w_list,
@@ -669,6 +669,8 @@ class Mapper(object):
                                          clean_mesh=self.clean_mesh, get_mask_use_all_frames=False)
                     os.system(
                         f"cp {mesh_out_file} {self.output}/mesh/{idx:05d}_mesh.ply")
+                    
+                    # 如果需要评估重建质量, 生成专用的 mesh 文件
                     if self.eval_rec:
                         mesh_out_file = f'{self.output}/mesh/final_mesh_eval_rec.ply'
                         self.mesher.get_mesh(mesh_out_file, self.c, self.decoders, self.keyframe_dict,
