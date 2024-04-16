@@ -16,7 +16,8 @@
                 "-W", "ignore"
             ],
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            
         }
     ]
 }

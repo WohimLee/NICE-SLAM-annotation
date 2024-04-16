@@ -13,6 +13,8 @@ from src.utils.datasets import get_dataset
 from src.utils.Visualizer import Visualizer
 
 
+
+
 class Mapper(object):
     """
     Mapper thread. Note that coarse mapper also uses this code.
@@ -51,7 +53,7 @@ class Mapper(object):
         self.device = cfg['mapping']['device']  # 使用的设备
         self.fix_fine = cfg['mapping']['fix_fine']  # 是否固定 fine level
         self.eval_rec = cfg['meshing']['eval_rec']  # 是否评估重建质量
-        self.BA = False  # # 即使BA被启用，也只至少有4个关键帧时才会进行 BA
+        self.BA = False  # 即使BA被启用，也只至少有4个关键帧时才会进行 BA
         self.BA_cam_lr = cfg['mapping']['BA_cam_lr']    
         self.mesh_freq = cfg['mapping']['mesh_freq']    # mesh 生成频率
         self.ckpt_freq = cfg['mapping']['ckpt_freq']    # checkpoint 保存频率
@@ -234,70 +236,79 @@ class Mapper(object):
 
     def optimize_map(self, num_joint_iters, lr_factor, idx, cur_gt_color, cur_gt_depth, gt_cur_c2w, keyframe_dict, keyframe_list, cur_c2w):
         """
-        Mapping iterations. Sample pixels from selected keyframes,
-        then optimize scene representation and camera poses(if local BA enabled).
-
+        Mapping 优化迭代过程。从选定的关键帧中采样像素点, 然后优化场景表示和相机位姿 (如果启用了局部 BA)
+        
         Args:
-            num_joint_iters (int): number of mapping iterations.
-            lr_factor (float): the factor to times on current lr.
-            idx (int): the index of current frame
-            cur_gt_color (tensor): gt_color image of the current camera.
-            cur_gt_depth (tensor): gt_depth image of the current camera.
-            gt_cur_c2w (tensor): groundtruth camera to world matrix corresponding to current frame.
-            keyframe_dict (list): list of keyframes info dictionary.
-            keyframe_list (list): list ofkeyframe index.
-            cur_c2w (tensor): the estimated camera to world matrix of current frame. 
+            num_joint_iters (int): Mapping 迭代次数
+            lr_factor (float): 当前学习率的倍数因子
+            idx (int): 当前帧的索引
+            cur_gt_color (tensor): 当前 gt color
+            cur_gt_depth (tensor): 当前 gt depth
+            gt_cur_c2w (tensor): 当前帧 gt c2w 矩阵
+            keyframe_dict (list): 关键帧信息字典列表
+            keyframe_list (list): 关键帧索引列表
+            cur_c2w (tensor): 当前帧的 c2w 估计
 
         Returns:
-            cur_c2w/None (tensor/None): return the updated cur_c2w, return None if no BA
+            cur_c2w/None (tensor/None): 返回更新后的 cur_c2w, 如果没有进行 BA 则返回 None
         """
-        H, W, fx, fy, cx, cy = self.H, self.W, self.fx, self.fy, self.cx, self.cy
-        c = self.c
+        
+        H, W, fx, fy, cx, cy = self.H, self.W, self.fx, self.fy, self.cx, self.cy # 获取图像的高度、宽度和相机内参
+        c = self.c # 获取当前场景的特征
         cfg = self.cfg
         device = self.device
         bottom = torch.from_numpy(np.array([0, 0, 0, 1.]).reshape(
-            [1, 4])).type(torch.float32).to(device)
+            [1, 4])).type(torch.float32).to(device) # 创建一个4x4变换矩阵的底部行，常用于表示齐次坐标下的变换矩阵
 
-        if len(keyframe_dict) == 0:
+        if len(keyframe_dict) == 0: # 检查关键帧字典是否为空，若为空，则设置优化帧列表为空
             optimize_frame = []
-        else:
-            if self.keyframe_selection_method == 'global':
-                num = self.mapping_window_size-2
+        else: # 如果关键帧字典非空，根据选择策略确定哪些帧将被用于优化
+            if self.keyframe_selection_method == 'global': # iMAP: 'global'策略: 从所有关键帧中随机选择特定数量的帧进行优化
+                num = self.mapping_window_size-2 # 计算需要选择的帧数，减2是因为最后两个位置留给最新的关键帧和当前帧
                 optimize_frame = random_select(len(self.keyframe_dict)-1, num)
-            elif self.keyframe_selection_method == 'overlap':
+            elif self.keyframe_selection_method == 'overlap': # NICE-SLAM: 'overlap'策略: 选择与当前帧有最大重叠区域的关键帧
                 num = self.mapping_window_size-2
                 optimize_frame = self.keyframe_selection_overlap(
-                    cur_gt_color, cur_gt_depth, cur_c2w, keyframe_dict[:-1], num)
+                    cur_gt_color, cur_gt_depth, cur_c2w, keyframe_dict[:-1], num) # 根据颜色、深度、当前帧的变换矩阵来选择帧
 
         # add the last keyframe and the current frame(use -1 to denote)
+        # 添加最后一个关键帧和当前帧（使用 -1 表示）
         oldest_frame = None
         if len(keyframe_list) > 0:
-            optimize_frame = optimize_frame + [len(keyframe_list)-1]
-            oldest_frame = min(optimize_frame)
-        optimize_frame += [-1]
+            optimize_frame = optimize_frame + [len(keyframe_list)-1] # 添加列表中最新的关键帧索引
+            oldest_frame = min(optimize_frame) # 找到最旧的帧索引，用于在后续步骤中固定，以避免优化漂移
+        optimize_frame += [-1] # 将当前帧索引（-1）添加到优化帧列表中
 
+        # 保存选定关键帧的信息
         if self.save_selected_keyframes_info:
-            keyframes_info = []
+            keyframes_info = [] # 初始化一个空列表用于存储关键帧的信息
+            # 遍历优化帧列表中的每个帧索引
             for id, frame in enumerate(optimize_frame):
+                # 如果帧索引不是 -1（表示这是一个有效的关键帧而不是当前帧）
                 if frame != -1:
-                    frame_idx = keyframe_list[frame]
-                    tmp_gt_c2w = keyframe_dict[frame]['gt_c2w']
-                    tmp_est_c2w = keyframe_dict[frame]['est_c2w']
-                else:
-                    frame_idx = idx
-                    tmp_gt_c2w = gt_cur_c2w
-                    tmp_est_c2w = cur_c2w
+                    frame_idx = keyframe_list[frame] # 获取实际的帧索引
+                    tmp_gt_c2w = keyframe_dict[frame]['gt_c2w'] # 获取该帧的 gt c2w矩阵
+                    tmp_est_c2w = keyframe_dict[frame]['est_c2w'] # 获取该帧的估计 c2w矩阵
+                    
+                else: # 如果帧索引是 -1，表示当前帧
+                    frame_idx = idx # 当前帧的索引
+                    tmp_gt_c2w = gt_cur_c2w # 当前帧的 gt c2w 矩阵
+                    tmp_est_c2w = cur_c2w # 当前帧的估计 c2w 矩阵
+                    
+                # 将当前帧的 idx 和 c2w 矩阵信息添加到关键帧信息列表
                 keyframes_info.append(
                     {'idx': frame_idx, 'gt_c2w': tmp_gt_c2w, 'est_c2w': tmp_est_c2w})
-            self.selected_keyframes[idx] = keyframes_info
+            self.selected_keyframes[idx] = keyframes_info # 将当前帧的关键帧信息列表保存到一个字典中，用当前帧的索引作为键
 
+        # 计算每个图像应分配多少像素点进行处理，这是根据 mapping 像素总数除以优化帧的数量得出
         pixs_per_image = self.mapping_pixels//len(optimize_frame)
 
-        decoders_para_list = []
-        coarse_grid_para = []
-        middle_grid_para = []
-        fine_grid_para = []
-        color_grid_para = []
+        # 初始化 decoder 和 grid 参数列表
+        decoders_para_list = [] # 用于存放所有 decoder 的参数
+        coarse_grid_para = [] # coarse grid 参数
+        middle_grid_para = [] # middle grid 参数
+        fine_grid_para = [] # fine grid 参数
+        color_grid_para = [] # color grid 参数
         gt_depth_np = cur_gt_depth.cpu().numpy()
         if self.nice:
             if self.frustum_feature_selection:
@@ -323,6 +334,7 @@ class Mapper(object):
                         0).unsqueeze(0).repeat(1, val.shape[1], 1, 1, 1)
                     val = val.to(device)
                     # val_grad is the optimizable part, other parameters will be fixed
+                    # val_grad 是可优化部分，其他参数将保持固定
                     val_grad = val[mask].clone()
                     val_grad = Variable(val_grad.to(
                         device), requires_grad=True)
@@ -353,6 +365,7 @@ class Mapper(object):
             gt_camera_tensor_list = []
             for frame in optimize_frame:
                 # the oldest frame should be fixed to avoid drifting
+                # 最旧的帧应该被固定以避免漂移
                 if frame != oldest_frame:
                     if frame != -1:
                         c2w = keyframe_dict[frame]['est_c2w']
@@ -370,6 +383,7 @@ class Mapper(object):
         if self.nice:
             if self.BA:
                 # The corresponding lr will be set according to which stage the optimization is in
+                # 根据优化阶段设置对应的学习率
                 optimizer = torch.optim.Adam([{'params': decoders_para_list, 'lr': 0},
                                               {'params': coarse_grid_para, 'lr': 0},
                                               {'params': middle_grid_para, 'lr': 0},
@@ -546,34 +560,34 @@ class Mapper(object):
 
     def run(self):
         cfg = self.cfg
-        # 读取第一帧数据并初始化估计的相机位姿列表
+        # 读取第一帧数据并初始化估计的相机位姿列表的第0个
         idx, gt_color, gt_depth, gt_c2w = self.frame_reader[0]
-
         self.estimate_c2w_list[0] = gt_c2w.cpu()
+        
         init = True     # 初始化标志位，用于标记是否是第一次迭代
-        prev_idx = -1   # 前一次处理的帧索引
+        prev_idx = -1   # 前一次处理的帧索引, 初始化为 -1
+        
+        # 主循环, 直到处理完所有帧或满足退出条件
         while (1):
-            # 循环直到处理完所有帧或满足退出条件
+            # 预先判断, 根据几种不同的同步方法确定是否处理当前帧
             while True:
-                idx = self.idx[0].clone()
-                if idx == self.n_img-1: # 如果已经是最后一帧，则退出循环
+                idx = self.idx[0].clone() # 当前帧索引
+                if idx == self.n_img-1: # 如果当前是最后一帧，则退出循环
                     break
-                
-                # 根据几种不同的同步方法确定是否处理当前帧
-                if self.sync_method == 'strict':
-                    if idx % self.every_frame == 0 and idx != prev_idx:
-                        break
 
+                if self.sync_method == 'strict':
+                    if idx % self.every_frame == 0 and idx != prev_idx: # every_frame 默认设置 5
+                        break
                 elif self.sync_method == 'loose':
                     if idx == 0 or idx >= prev_idx+self.every_frame//2:
                         break
                 elif self.sync_method == 'free':
                     break
-                time.sleep(0.1) # 短暂等待，避免密集查询
+                time.sleep(0.1) # 短暂延迟，以减少在等待过程中对 CPU 资源的过度占用，特别是在等待条件尚未满足时
             prev_idx = idx      # 更新前一次处理的帧索引
 
-            if self.verbose:
-                # 如果开启了详细输出，打印当前正在 mapping 的帧信息
+            # 如果开启了详细输出，打印当前正在 mapping 的帧信息
+            if self.verbose:           
                 print(Fore.GREEN)
                 prefix = 'Coarse ' if self.coarse_mapper else ''
                 print(prefix+"Mapping Frame ", idx.item())
@@ -677,6 +691,7 @@ class Mapper(object):
                                              self.estimate_c2w_list, idx, self.device, show_forecast=False,
                                              clean_mesh=self.clean_mesh, get_mask_use_all_frames=True)
                     break
-
+            
+            # 如果已处理到最后一帧，退出循环
             if idx == self.n_img-1:
                 break

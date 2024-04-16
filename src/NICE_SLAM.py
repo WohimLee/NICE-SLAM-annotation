@@ -332,7 +332,6 @@ class NICE_SLAM():
             if self.mapping_first_frame[0] == 1:
                 break
             time.sleep(1)
-
         self.tracker.run()
 
     def mapping(self, rank):
