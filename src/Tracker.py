@@ -218,7 +218,7 @@ class Tracker(object):
                 else:
                     estimated_new_cam_c2w = pre_c2w
 
-                # 根据预测的相机位姿进行优化
+                # 从估计的新的相机位姿获取相机的 tensor 表示
                 camera_tensor = get_tensor_from_camera(
                     estimated_new_cam_c2w.detach())
                 if self.seperate_LR: 
@@ -234,42 +234,54 @@ class Tracker(object):
                     # 如果分别优化旋转和平移，则使用不同的学习率
                     optimizer_camera = torch.optim.Adam([{'params': cam_para_list_T, 'lr': self.cam_lr},
                                                          {'params': cam_para_list_quad, 'lr': self.cam_lr*0.2}])
-                else:
-                    camera_tensor = Variable(
+                else: # 如果没有设置分别优化 R 和 t
+                    camera_tensor = Variable( # 将摄像机张量转移到计算设备上，并设置为可优化
                         camera_tensor.to(device), requires_grad=True)
-                    cam_para_list = [camera_tensor]
-                    optimizer_camera = torch.optim.Adam(
+                    cam_para_list = [camera_tensor] # 创建包含摄像机张量的参数列表
+                    optimizer_camera = torch.optim.Adam( # 创建优化器，为摄像机参数设置学习率
                         cam_para_list, lr=self.cam_lr)
 
+                # 计算初始损失：这一步计算的是估计的摄像机位姿张量与真实摄像机位姿张量之间的差的绝对值的平均值
+                # 这里的损失用于评估初始的估计精度，并在优化过程中作为对比基准
                 initial_loss_camera_tensor = torch.abs(
                     gt_camera_tensor.to(device)-camera_tensor).mean().item()
+                # 初始化候选摄像机张量变量，这个变量用于存储在优化过程中发现的损失最小的摄像机位姿
                 candidate_cam_tensor = None
+                # 设置一个非常大的初始最小损失值，这个值会在接下来的优化迭代中更新
+                # 如果在迭代过程中找到一个损失更小的摄像机位姿，该值将被更新为较小的损失值
                 current_min_loss = 10000000000.
                 
                 # 优化相机位姿
                 for cam_iter in range(self.num_cam_iters):
-                    if self.seperate_LR:
-                        camera_tensor = torch.cat([quad, T], 0).to(self.device)
+                    if self.seperate_LR: # 分开 R 和 t 优化
+                        camera_tensor = torch.cat([quad, T], 0).to(self.device) # 将旋转和平移参数合并成一个张量
 
+                    # 使用visualizer工具可视化当前迭代的结果，包括当前帧索引、迭代次数、深度图、颜色图和摄像机张量
                     self.visualizer.vis(
                         idx, cam_iter, gt_depth, gt_color, camera_tensor, self.c, self.decoders)
 
+                    # 调用optimize_cam_in_batch函数来优化摄像机参数，计算此次迭代的损失
                     loss = self.optimize_cam_in_batch(
                         camera_tensor, gt_color, gt_depth, self.tracking_pixels, optimizer_camera)
 
-                    if cam_iter == 0:
+                    if cam_iter == 0: # 如果是第一次迭代，记录下初始的损失值
                         initial_loss = loss
 
+                    # 计算当前相机 tensor 与 gt 之间的误差
                     loss_camera_tensor = torch.abs(
                         gt_camera_tensor.to(device)-camera_tensor).mean().item()
+                    
+                    # 如果开启了详细输出，打印最后一次迭代的重渲染损失和相机张量误差
                     if self.verbose:
                         if cam_iter == self.num_cam_iters-1:
                             print(
                                 f'Re-rendering loss: {initial_loss:.2f}->{loss:.2f} ' +
                                 f'camera tensor error: {initial_loss_camera_tensor:.4f}->{loss_camera_tensor:.4f}')
+                    # 如果当前损失小于当前记录的最小损失，则更新最小损失和候选相机 tensor
                     if loss < current_min_loss:
                         current_min_loss = loss
                         candidate_cam_tensor = camera_tensor.clone().detach()
+                # 构建齐次坐标的最后一行，用于从相机 tensor 中得到完整的4x4相机矩阵
                 bottom = torch.from_numpy(np.array([0, 0, 0, 1.]).reshape(
                     [1, 4])).type(torch.float32).to(self.device)
                 
